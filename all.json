@@ -23,6 +23,12 @@
       "type": 3,
       "api": "csp_porntn",
       "ext": "https://raw.githubusercontent.com/luohao835-hub/video/main/porntn.js"
+    },
+    {
+      "name": "YouPorn",
+      "type": 3,
+      "api": "csp_youporn",
+      "ext": "https://raw.githubusercontent.com/luohao835-hub/video/main/youporn.js"
     }
   ]
 }
