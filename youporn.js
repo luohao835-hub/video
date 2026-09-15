@@ -8,26 +8,10 @@ let appConfig = {
   title: "YouPorn",
   site: "https://www.youporn.com",
   tabs: [
-    {
-      name: "Recommended",
-      ext: { id: "/" },
-      ui: 1,
-    },
-    {
-      name: "Most Viewed",
-      ext: { id: "/most_viewed/" },
-      ui: 1,
-    },
-    {
-      name: "Top Rated",
-      ext: { id: "/top_rated/" },
-      ui: 1,
-    },
-    {
-      name: "Newest",
-      ext: { id: "/time/" },
-      ui: 1,
-    },
+    { name: "Recommended", ext: { id: "/" }, ui: 1 },
+    { name: "Most Viewed", ext: { id: "/most_viewed/" }, ui: 1 },
+    { name: "Top Rated", ext: { id: "/top_rated/" }, ui: 1 },
+    { name: "Newest", ext: { id: "/time/" }, ui: 1 },
   ],
 };
 
@@ -42,7 +26,7 @@ async function getCards(ext) {
 
   let url = appConfig.site + id;
   if (page > 1) {
-    url = url + (url.includes("?") ? "&" : "?") + `page=${page}`;
+    url += (url.includes("?") ? "&" : "?") + `page=${page}`;
   }
 
   const { data } = await $fetch.get(url, {
@@ -71,12 +55,8 @@ async function getCards(ext) {
       $el.find("img").attr("data-poster") ||
       "";
 
-    if (href && !href.startsWith("http")) {
-      href = appConfig.site + href;
-    }
-    if (cover && cover.startsWith("//")) {
-      cover = "https:" + cover;
-    }
+    if (href && !href.startsWith("http")) href = appConfig.site + href;
+    if (cover && cover.startsWith("//")) cover = "https:" + cover;
 
     const duration =
       $el.find('.duration, [class*="duration"]').text().trim() || "";
@@ -87,22 +67,18 @@ async function getCards(ext) {
         vod_name: title,
         vod_pic: cover,
         vod_remarks: duration,
-        ext: {
-          url: href,
-        },
+        ext: { url: href },
       });
     }
   });
 
-  return jsonify({
-    list: cards,
-  });
+  return jsonify({ list: cards });
 }
 
 async function getTracks(ext) {
   ext = argsify(ext);
   let tracks = [];
-  let url = ext.url;
+  const url = ext.url;
 
   const { data } = await $fetch.get(url, {
     headers: {
@@ -112,15 +88,12 @@ async function getTracks(ext) {
     },
   });
 
+  // 提取 mediaDefinitions（兼容转义）
   let mediaDefs = null;
-
-  // 1. 提取 playervars 里的 mediaDefinitions
-  const playerMatch = data.match(
-    /mediaDefinitions["']?\s*[:=]\s*(\[[\s\S]*?\])\s*[,}]/,
-  );
-  if (playerMatch) {
+  const m = data.match(/"mediaDefinitions"\s*:\s*(\[[\s\S]*?\])\s*,\s*"/);
+  if (m) {
     try {
-      const raw = playerMatch[1]
+      const raw = m[1]
         .replace(/\\"/g, '"')
         .replace(/\\\//g, "/")
         .replace(/\\u0026/g, "&");
@@ -128,99 +101,80 @@ async function getTracks(ext) {
     } catch (e) {}
   }
 
-  // 2. 如果没取到，尝试 API
+  // 备用：从 page 里找 hls / mp4 中间地址
   if (!mediaDefs || !Array.isArray(mediaDefs)) {
-    const idMatch = url.match(/\/watch\/(\d+)/);
-    if (idMatch) {
-      try {
-        const apiUrl = `https://www.youporn.com/api/video/media_definitions/${idMatch[1]}/`;
-        const { data: apiData } = await $fetch.get(apiUrl, {
-          headers: {
-            "User-Agent": UA,
-            Cookie: "age_verified=1; platform=pc",
-            Referer: url,
-          },
-        });
-        mediaDefs = typeof apiData === "string" ? JSON.parse(apiData) : apiData;
-      } catch (e) {}
-    }
+    const hlsMatch = data.match(
+      /https:\/\/www\.youporn\.com\/media\/hls\/\?s=[^"\\]+/,
+    );
+    const mp4Match = data.match(
+      /https:\/\/www\.youporn\.com\/media\/mp4\/\?s=[^"\\]+/,
+    );
+    mediaDefs = [];
+    if (hlsMatch) mediaDefs.push({ format: "hls", videoUrl: hlsMatch[0] });
+    if (mp4Match) mediaDefs.push({ format: "mp4", videoUrl: mp4Match[0] });
   }
 
-  if (mediaDefs && Array.isArray(mediaDefs) && mediaDefs.length > 0) {
-    // 优先找 hls 格式的中间地址
-    let intermediate = mediaDefs.find(
-      (item) => item.format === "hls" && item.videoUrl,
-    );
-    if (!intermediate) {
-      intermediate = mediaDefs.find((item) => item.videoUrl);
-    }
+  if (mediaDefs && mediaDefs.length > 0) {
+    // 优先 hls，其次 mp4
+    const candidates = [
+      ...mediaDefs.filter((i) => i.format === "hls" && i.videoUrl),
+      ...mediaDefs.filter((i) => i.format === "mp4" && i.videoUrl),
+      ...mediaDefs.filter((i) => i.videoUrl),
+    ];
 
-    if (intermediate && intermediate.videoUrl) {
+    for (const item of candidates) {
       try {
-        // 请求中间地址，拿到真正的清晰度列表
-        const { data: realData } = await $fetch.get(intermediate.videoUrl, {
+        const { data: realData } = await $fetch.get(item.videoUrl, {
           headers: {
             "User-Agent": UA,
             Cookie: "age_verified=1; platform=pc",
             Referer: url,
+            Origin: "https://www.youporn.com",
           },
         });
 
-        let realList =
+        let list =
           typeof realData === "string" ? JSON.parse(realData) : realData;
+        if (!Array.isArray(list)) continue;
 
-        if (Array.isArray(realList) && realList.length > 0) {
-          // 按质量从高到低排序
-          realList
-            .filter((item) => item.videoUrl)
-            .sort(
-              (a, b) =>
-                (parseInt(b.quality) || parseInt(b.height) || 0) -
-                (parseInt(a.quality) || parseInt(a.height) || 0),
-            )
-            .forEach((item) => {
-              tracks.push({
-                name:
-                  (item.quality || item.height || item.format || "Default") +
-                  "p",
-                pan: "",
-                ext: {
-                  url: item.videoUrl,
-                },
-              });
+        list
+          .filter((x) => x.videoUrl)
+          .sort(
+            (a, b) =>
+              (parseInt(b.quality) || parseInt(b.height) || 0) -
+              (parseInt(a.quality) || parseInt(a.height) || 0),
+          )
+          .forEach((x) => {
+            tracks.push({
+              name: (x.quality || x.height || x.format || "Default") + "p",
+              pan: "",
+              ext: { url: x.videoUrl },
             });
-        }
+          });
+
+        if (tracks.length > 0) break;
       } catch (e) {
-        // 中间请求失败就用原始地址兜底
+        // 二次请求失败，先把中间地址放进去兜底
         tracks.push({
-          name: intermediate.quality || intermediate.format || "默认",
+          name: (item.format || "default").toUpperCase(),
           pan: "",
-          ext: {
-            url: intermediate.videoUrl,
-          },
+          ext: { url: item.videoUrl },
         });
       }
     }
   }
 
-  // 最终兜底
+  // 最终兜底：返回原页面
   if (tracks.length === 0) {
     tracks.push({
-      name: "默认播放",
+      name: "默认",
       pan: "",
-      ext: {
-        url: url,
-      },
+      ext: { url: url },
     });
   }
 
   return jsonify({
-    list: [
-      {
-        title: "默认分组",
-        tracks,
-      },
-    ],
+    list: [{ title: "默认分组", tracks }],
   });
 }
 
@@ -228,14 +182,51 @@ async function getPlayinfo(ext) {
   ext = argsify(ext);
   const url = ext.url;
 
+  // 如果还是中间地址，再试一次解析
+  if (url.includes("/media/hls/") || url.includes("/media/mp4/")) {
+    try {
+      const { data: realData } = await $fetch.get(url, {
+        headers: {
+          "User-Agent": UA,
+          Cookie: "age_verified=1; platform=pc",
+          Referer: "https://www.youporn.com/",
+          Origin: "https://www.youporn.com",
+        },
+      });
+      let list = typeof realData === "string" ? JSON.parse(realData) : realData;
+      if (Array.isArray(list) && list.length > 0) {
+        // 取最高清晰度
+        list.sort(
+          (a, b) =>
+            (parseInt(b.quality) || parseInt(b.height) || 0) -
+            (parseInt(a.quality) || parseInt(a.height) || 0),
+        );
+        const best = list[0];
+        if (best && best.videoUrl) {
+          return jsonify({
+            urls: [best.videoUrl],
+            headers: [
+              {
+                "User-Agent": UA,
+                Referer: "https://www.youporn.com/",
+                Origin: "https://www.youporn.com",
+                Cookie: "age_verified=1; platform=pc",
+              },
+            ],
+          });
+        }
+      }
+    } catch (e) {}
+  }
+
   return jsonify({
     urls: [url],
     headers: [
       {
         "User-Agent": UA,
         Referer: "https://www.youporn.com/",
-        Cookie: "age_verified=1; platform=pc",
         Origin: "https://www.youporn.com",
+        Cookie: "age_verified=1; platform=pc",
       },
     ],
   });
@@ -244,10 +235,9 @@ async function getPlayinfo(ext) {
 async function search(ext) {
   ext = argsify(ext);
   let cards = [];
-  let text = encodeURIComponent(ext.text);
-  let page = ext.page || 1;
-
-  let url = `${appConfig.site}/search/?query=${text}&page=${page}`;
+  const text = encodeURIComponent(ext.text);
+  const page = ext.page || 1;
+  const url = `${appConfig.site}/search/?query=${text}&page=${page}`;
 
   const { data } = await $fetch.get(url, {
     headers: {
@@ -275,12 +265,8 @@ async function search(ext) {
       $el.find("img").attr("data-poster") ||
       "";
 
-    if (href && !href.startsWith("http")) {
-      href = appConfig.site + href;
-    }
-    if (cover && cover.startsWith("//")) {
-      cover = "https:" + cover;
-    }
+    if (href && !href.startsWith("http")) href = appConfig.site + href;
+    if (cover && cover.startsWith("//")) cover = "https:" + cover;
 
     const duration =
       $el.find('.duration, [class*="duration"]').text().trim() || "";
@@ -291,14 +277,10 @@ async function search(ext) {
         vod_name: title,
         vod_pic: cover,
         vod_remarks: duration,
-        ext: {
-          url: href,
-        },
+        ext: { url: href },
       });
     }
   });
 
-  return jsonify({
-    list: cards,
-  });
+  return jsonify({ list: cards });
 }
