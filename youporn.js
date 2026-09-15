@@ -42,55 +42,57 @@ async function getCards(ext) {
 
   let url = appConfig.site + id;
   if (page > 1) {
-    // YouPorn 分页通常是 ?page=2 或 /page-2/
     url = url + (url.includes("?") ? "&" : "?") + `page=${page}`;
   }
 
   const { data } = await $fetch.get(url, {
     headers: {
       "User-Agent": UA,
-      Cookie: "age_verified=1",
+      Cookie: "age_verified=1; platform=pc",
+      Referer: appConfig.site + "/",
     },
   });
 
   const $ = cheerio.load(data);
 
-  // 常见选择器，可能需要根据实际页面调整
-  $("div.video-box, .video-list .video-box, .js-videoBox, .phimage").each(
-    (_, element) => {
-      const a = $(element).find("a").first();
-      let href = a.attr("href") || "";
-      const title =
-        a.attr("title") ||
-        a.find("img").attr("alt") ||
-        $(element).find(".title a").text().trim() ||
-        "";
-      let cover =
-        a.find("img").attr("src") ||
-        a.find("img").attr("data-src") ||
-        a.find("img").attr("data-mediumthumb") ||
-        "";
+  $("article.video-box").each((_, element) => {
+    const $el = $(element);
+    const vid = $el.attr("data-video-id") || "";
+    let href = $el.find("a").first().attr("href") || "";
+    const title =
+      $el.attr("aria-label") ||
+      $el.find(".video-title-text span").text().trim() ||
+      $el.find(".video-title-text").text().trim() ||
+      "";
 
-      if (href && !href.startsWith("http")) {
-        href = appConfig.site + href;
-      }
-      if (cover && !cover.startsWith("http")) {
-        cover = "https:" + cover;
-      }
+    let cover =
+      $el.find("img").attr("src") ||
+      $el.find("img").attr("data-src") ||
+      $el.find("img").attr("data-poster") ||
+      "";
 
-      if (href && title) {
-        cards.push({
-          vod_id: href,
-          vod_name: title.trim(),
-          vod_pic: cover,
-          vod_remarks: $(element).find(".duration").text().trim() || "",
-          ext: {
-            url: href,
-          },
-        });
-      }
-    },
-  );
+    if (href && !href.startsWith("http")) {
+      href = appConfig.site + href;
+    }
+    if (cover && cover.startsWith("//")) {
+      cover = "https:" + cover;
+    }
+
+    const duration =
+      $el.find('.duration, [class*="duration"]').text().trim() || "";
+
+    if (href && title) {
+      cards.push({
+        vod_id: vid || href,
+        vod_name: title,
+        vod_pic: cover,
+        vod_remarks: duration,
+        ext: {
+          url: href,
+        },
+      });
+    }
+  });
 
   return jsonify({
     list: cards,
@@ -102,28 +104,26 @@ async function getTracks(ext) {
   let tracks = [];
   let url = ext.url;
 
-  // 先拿页面
   const { data } = await $fetch.get(url, {
     headers: {
       "User-Agent": UA,
-      Cookie: "age_verified=1",
+      Cookie: "age_verified=1; platform=pc",
       Referer: appConfig.site + "/",
     },
   });
 
-  // 方法1：尝试从 playervars / mediaDefinitions 提取
   let mediaDefs = null;
 
-  // 匹配 playervars
+  // 1. 尝试从 playervars 提取
   const playerMatch = data.match(/playervars\s*[:=]\s*(\{[\s\S]*?\})\s*[,;]/);
   if (playerMatch) {
     try {
       const playervars = JSON.parse(playerMatch[1]);
-      mediaDefs = playervars.mediaDefinitions || playervars;
+      mediaDefs = playervars.mediaDefinitions || null;
     } catch (e) {}
   }
 
-  // 方法2：尝试 API（有时可用）
+  // 2. 尝试 media_definitions API
   if (!mediaDefs) {
     const idMatch = url.match(/\/watch\/(\d+)/);
     if (idMatch) {
@@ -132,7 +132,7 @@ async function getTracks(ext) {
         const { data: apiData } = await $fetch.get(apiUrl, {
           headers: {
             "User-Agent": UA,
-            Cookie: "age_verified=1",
+            Cookie: "age_verified=1; platform=pc",
             Referer: url,
           },
         });
@@ -142,8 +142,11 @@ async function getTracks(ext) {
   }
 
   if (mediaDefs && Array.isArray(mediaDefs)) {
-    mediaDefs.forEach((item) => {
-      if (item.videoUrl) {
+    // 按质量从高到低排序
+    mediaDefs
+      .filter((item) => item.videoUrl)
+      .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))
+      .forEach((item) => {
         tracks.push({
           name:
             (item.quality || item.format || "Default") +
@@ -153,14 +156,13 @@ async function getTracks(ext) {
             url: item.videoUrl,
           },
         });
-      }
-    });
+      });
   }
 
-  // 兜底
+  // 兜底：返回原页面让播放器嗅探
   if (tracks.length === 0) {
     tracks.push({
-      name: "播放（需嗅探）",
+      name: "默认播放",
       pan: "",
       ext: {
         url: url,
@@ -188,7 +190,7 @@ async function getPlayinfo(ext) {
       {
         "User-Agent": UA,
         Referer: appConfig.site + "/",
-        Cookie: "age_verified=1",
+        Cookie: "age_verified=1; platform=pc",
       },
     ],
   });
@@ -205,47 +207,51 @@ async function search(ext) {
   const { data } = await $fetch.get(url, {
     headers: {
       "User-Agent": UA,
-      Cookie: "age_verified=1",
+      Cookie: "age_verified=1; platform=pc",
+      Referer: appConfig.site + "/",
     },
   });
 
   const $ = cheerio.load(data);
 
-  $("div.video-box, .video-list .video-box, .js-videoBox, .phimage").each(
-    (_, element) => {
-      const a = $(element).find("a").first();
-      let href = a.attr("href") || "";
-      const title =
-        a.attr("title") ||
-        a.find("img").attr("alt") ||
-        $(element).find(".title a").text().trim() ||
-        "";
-      let cover =
-        a.find("img").attr("src") ||
-        a.find("img").attr("data-src") ||
-        a.find("img").attr("data-mediumthumb") ||
-        "";
+  $("article.video-box").each((_, element) => {
+    const $el = $(element);
+    const vid = $el.attr("data-video-id") || "";
+    let href = $el.find("a").first().attr("href") || "";
+    const title =
+      $el.attr("aria-label") ||
+      $el.find(".video-title-text span").text().trim() ||
+      $el.find(".video-title-text").text().trim() ||
+      "";
 
-      if (href && !href.startsWith("http")) {
-        href = appConfig.site + href;
-      }
-      if (cover && !cover.startsWith("http")) {
-        cover = "https:" + cover;
-      }
+    let cover =
+      $el.find("img").attr("src") ||
+      $el.find("img").attr("data-src") ||
+      $el.find("img").attr("data-poster") ||
+      "";
 
-      if (href && title) {
-        cards.push({
-          vod_id: href,
-          vod_name: title.trim(),
-          vod_pic: cover,
-          vod_remarks: $(element).find(".duration").text().trim() || "",
-          ext: {
-            url: href,
-          },
-        });
-      }
-    },
-  );
+    if (href && !href.startsWith("http")) {
+      href = appConfig.site + href;
+    }
+    if (cover && cover.startsWith("//")) {
+      cover = "https:" + cover;
+    }
+
+    const duration =
+      $el.find('.duration, [class*="duration"]').text().trim() || "";
+
+    if (href && title) {
+      cards.push({
+        vod_id: vid || href,
+        vod_name: title,
+        vod_pic: cover,
+        vod_remarks: duration,
+        ext: {
+          url: href,
+        },
+      });
+    }
+  });
 
   return jsonify({
     list: cards,
