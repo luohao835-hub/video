@@ -19,6 +19,14 @@ async function getConfig() {
   return jsonify(appConfig);
 }
 
+function absUrl(u, base) {
+  if (!u) return "";
+  if (u.startsWith("//")) return "https:" + u;
+  if (u.startsWith("http")) return u;
+  const b = base || appConfig.site;
+  return b + (u.startsWith("/") ? u : "/" + u);
+}
+
 async function getCards(ext) {
   ext = argsify(ext);
   let cards = [];
@@ -26,11 +34,12 @@ async function getCards(ext) {
 
   let url = appConfig.site + (id || "/");
   if (page > 1) {
-    // 常见分页： /page/2/ 或 ?page=2
-    if (url.endsWith("/")) {
+    if (url.indexOf("?") >= 0) {
+      url += "&page=" + page;
+    } else if (url.endsWith("/")) {
       url = url + page + "/";
     } else {
-      url = url + "/page/" + page + "/";
+      url = url + "/" + page + "/";
     }
   }
 
@@ -38,56 +47,122 @@ async function getCards(ext) {
     headers: {
       "User-Agent": UA,
       Referer: appConfig.site + "/",
-      Cookie: "age_verified=1; platform=pc",
+      Cookie: "age_verified=1; platform=pc; cookies_accepted=1",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
     },
   });
 
+  if (!data || data.length < 500) {
+    return jsonify({ list: [] });
+  }
+
   const $ = cheerio.load(data);
 
-  // 匹配 /video-数字 链接
-  $("a[href*='/video-']").each((_, element) => {
-    const $a = $(element);
-    let href = $a.attr("href") || "";
-    if (!href || !href.includes("/video-")) return;
+  // 多种可能选择器（tube 站点常见，与 PornTN / YouPorn 类似）
+  const selectors = [
+    "div.item",
+    "div.thumb",
+    "div.video-item",
+    "div[class*='thumb']",
+    "div[class*='video']",
+    "article",
+    ".list-videos .item",
+    ".thumbs .thumb",
+    "a[href*='/video-']",
+  ];
 
-    // 只取卡片主链接，避免重复
-    const parent = $a.closest(".item, .thumb, .video-item, [class*='thumb'], article, .card");
-    const title =
-      $a.attr("title") ||
-      parent.find(".title, .video-title, h3, h4, .name").text().trim() ||
-      $a.text().trim() ||
-      "";
-    let cover =
-      parent.find("img").attr("src") ||
-      parent.find("img").attr("data-src") ||
-      parent.find("img").attr("data-original") ||
-      $a.find("img").attr("src") ||
-      $a.find("img").attr("data-src") ||
-      "";
+  let found = false;
+  for (const sel of selectors) {
+    const nodes = $(sel);
+    if (nodes.length === 0) continue;
 
-    if (href && !href.startsWith("http")) {
-      href = appConfig.site + (href.startsWith("/") ? href : "/" + href);
-    }
-    if (cover && cover.startsWith("//")) {
-      cover = "https:" + cover;
-    }
+    nodes.each((_, element) => {
+      const $el = $(element);
+      let href = "";
+      let title = "";
+      let cover = "";
+      let duration = "";
 
-    const duration =
-      parent.find(".duration, [class*='duration'], .time").text().trim() || "";
+      if ($el.is("a")) {
+        href = $el.attr("href") || "";
+        title = $el.attr("title") || $el.text().trim();
+        cover =
+          $el.find("img").attr("src") ||
+          $el.find("img").attr("data-src") ||
+          $el.find("img").attr("data-original") ||
+          "";
+      } else {
+        const a = $el
+          .find("a[href*='/video-'], a[href*='/videos/'], a")
+          .first();
+        href = a.attr("href") || "";
+        title =
+          a.attr("title") ||
+          $el
+            .find(".title, .video-title, .name, h3, h4, span.title")
+            .text()
+            .trim() ||
+          a.text().trim() ||
+          $el.find("img").attr("alt") ||
+          "";
+        cover =
+          $el.find("img").attr("data-src") ||
+          $el.find("img").attr("src") ||
+          $el.find("img").attr("data-original") ||
+          $el.find("img").attr("data-poster") ||
+          "";
+        duration =
+          $el.find(".duration, .time, [class*='duration']").text().trim() || "";
+      }
 
-    if (href && (title || cover)) {
+      if (!href || (!href.includes("video") && !href.includes("/v/"))) return;
+
+      href = absUrl(href);
+      cover = absUrl(cover);
+
+      if (href && (title || cover)) {
+        cards.push({
+          vod_id: href,
+          vod_name: (title || href.split("/").pop()).trim(),
+          vod_pic: cover,
+          vod_remarks: duration,
+          vod_duration: duration,
+          ext: { url: href },
+        });
+        found = true;
+      }
+    });
+
+    if (found && cards.length > 5) break;
+  }
+
+  // 最终兜底：全文扫 video- 链接
+  if (cards.length === 0) {
+    $("a[href*='video-'], a[href*='/videos/']").each((_, el) => {
+      let href = absUrl($(el).attr("href") || "");
+      if (!href) return;
+      const title =
+        $(el).attr("title") ||
+        $(el).text().trim() ||
+        $(el).find("img").attr("alt") ||
+        href.split("/").pop();
+      const cover = absUrl(
+        $(el).find("img").attr("data-src") ||
+          $(el).find("img").attr("src") ||
+          "",
+      );
       cards.push({
         vod_id: href,
-        vod_name: title || href.split("/").pop(),
+        vod_name: title,
         vod_pic: cover,
-        vod_remarks: duration,
-        vod_duration: duration,
+        vod_remarks: "",
         ext: { url: href },
       });
-    }
-  });
+    });
+  }
 
-  // 去重（同一视频可能有多个 a 标签）
   const seen = new Set();
   cards = cards.filter((c) => {
     if (seen.has(c.vod_id)) return false;
@@ -100,74 +175,100 @@ async function getCards(ext) {
 
 async function getTracks(ext) {
   ext = argsify(ext);
-  let tracks = [];
-  let url = ext.url;
+  const tracks = [];
+  const url = ext.url;
 
   const { data } = await $fetch.get(url, {
     headers: {
       "User-Agent": UA,
       Referer: appConfig.site + "/",
-      Cookie: "age_verified=1; platform=pc",
+      Cookie: "age_verified=1; platform=pc; cookies_accepted=1",
     },
   });
 
+  if (!data) {
+    tracks.push({ name: "页面播放", pan: "", ext: { url } });
+    return jsonify({ list: [{ title: "默认分组", tracks }] });
+  }
+
   let playUrl = null;
 
-  // 常见 tube 站点 video 源提取
+  // 1. 类似 YouPorn 的 mediaDefinitions / flashvars / video_url
   const patterns = [
-    /["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i,
-    /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i,
+    /mediaDefinitions["']?\s*[:=]\s*(\[[\s\S]*?\])\s*[,;}]/,
+    /flashvars\s*[:=]\s*(\{[\s\S]*?\})\s*[,;]/,
     /video_url\s*[:=]\s*["']([^"']+)["']/i,
-    /source\s*[:=]\s*["'](https?:\/\/[^"']+)["']/i,
+    /["']video_url["']\s*:\s*["']([^"']+)["']/i,
+    /source\s*[:=]\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i,
     /file\s*[:=]\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i,
     /src\s*[:=]\s*["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i,
+    /(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/i,
+    /(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i,
   ];
 
   for (const re of patterns) {
     const m = data.match(re);
-    if (m) {
+    if (!m) continue;
+
+    if (
+      re.source.includes("mediaDefinitions") ||
+      re.source.includes("flashvars")
+    ) {
+      try {
+        let jsonStr = m[1];
+        jsonStr = jsonStr.replace(/,\s*([}\]])/g, "$1");
+        const obj = JSON.parse(jsonStr);
+        const list = Array.isArray(obj)
+          ? obj
+          : obj.mediaDefinitions || obj.video_url || [];
+        if (Array.isArray(list) && list.length) {
+          list.forEach((item) => {
+            const u = item.videoUrl || item.video_url || item.file || item.src;
+            if (u) {
+              tracks.push({
+                name: String(
+                  item.quality || item.format || item.height || "Default",
+                ),
+                pan: "",
+                ext: { url: absUrl(u) },
+              });
+            }
+          });
+          if (tracks.length) break;
+        } else if (typeof obj === "string") {
+          playUrl = obj;
+        }
+      } catch (e) {}
+    } else {
       playUrl = m[1];
       break;
     }
   }
 
-  // 从 script 再扫
-  if (!playUrl) {
+  // video / source 标签
+  if (!playUrl && tracks.length === 0) {
     const $ = cheerio.load(data);
-    $("script").each((_, el) => {
-      const txt = $(el).html() || "";
-      for (const re of patterns) {
-        const m = txt.match(re);
-        if (m) {
-          playUrl = m[1];
-          return false;
-        }
-      }
-    });
-  }
-
-  // video 标签
-  if (!playUrl) {
-    const $ = cheerio.load(data);
-    const src =
+    playUrl =
       $("video source").attr("src") ||
       $("video").attr("src") ||
-      $("source[type*='video']").attr("src");
-    if (src) playUrl = src;
+      $("source[type*='video']").attr("src") ||
+      null;
   }
 
   if (playUrl) {
-    if (playUrl.startsWith("//")) playUrl = "https:" + playUrl;
+    playUrl = absUrl(playUrl);
     tracks.push({
       name: "播放",
       pan: "",
       ext: { url: playUrl },
     });
-  } else {
+  }
+
+  if (tracks.length === 0) {
     tracks.push({
       name: "页面播放",
       pan: "",
-      ext: { url: url },
+      ext: { url },
     });
   }
 
@@ -178,72 +279,21 @@ async function getTracks(ext) {
 
 async function getPlayinfo(ext) {
   ext = argsify(ext);
-  return jsonify({ urls: [ext.url] });
+  return jsonify({
+    urls: [ext.url],
+    headers: [
+      {
+        "User-Agent": UA,
+        Referer: appConfig.site + "/",
+        Cookie: "age_verified=1; platform=pc",
+        Origin: appConfig.site,
+      },
+    ],
+  });
 }
 
 async function search(ext) {
   ext = argsify(ext);
-  let cards = [];
-  let text = encodeURIComponent(ext.text || "");
-  let page = ext.page || 1;
-
-  let url = `${appConfig.site}/search/${text}/`;
-  if (page > 1) {
-    url = `${appConfig.site}/search/${text}/${page}/`;
-  }
-
-  const { data } = await $fetch.get(url, {
-    headers: {
-      "User-Agent": UA,
-      Referer: appConfig.site + "/",
-      Cookie: "age_verified=1; platform=pc",
-    },
-  });
-
-  const $ = cheerio.load(data);
-
-  $("a[href*='/video-']").each((_, element) => {
-    const $a = $(element);
-    let href = $a.attr("href") || "";
-    if (!href || !href.includes("/video-")) return;
-
-    const parent = $a.closest(".item, .thumb, .video-item, [class*='thumb'], article, .card");
-    const title =
-      $a.attr("title") ||
-      parent.find(".title, .video-title, h3, h4, .name").text().trim() ||
-      $a.text().trim() ||
-      "";
-    let cover =
-      parent.find("img").attr("src") ||
-      parent.find("img").attr("data-src") ||
-      $a.find("img").attr("src") ||
-      $a.find("img").attr("data-src") ||
-      "";
-
-    if (href && !href.startsWith("http")) {
-      href = appConfig.site + (href.startsWith("/") ? href : "/" + href);
-    }
-    if (cover && cover.startsWith("//")) {
-      cover = "https:" + cover;
-    }
-
-    if (href && (title || cover)) {
-      cards.push({
-        vod_id: href,
-        vod_name: title || href.split("/").pop(),
-        vod_pic: cover,
-        vod_remarks: "",
-        ext: { url: href },
-      });
-    }
-  });
-
-  const seen = new Set();
-  cards = cards.filter((c) => {
-    if (seen.has(c.vod_id)) return false;
-    seen.add(c.vod_id);
-    return true;
-  });
-
-  return jsonify({ list: cards });
+  const text = encodeURIComponent(ext.text || "");
+  return getCards({ page: 1, id: `/search/${text}/` });
 }
