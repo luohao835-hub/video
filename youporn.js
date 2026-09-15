@@ -114,17 +114,22 @@ async function getTracks(ext) {
 
   let mediaDefs = null;
 
-  // 1. 尝试从 playervars 提取
-  const playerMatch = data.match(/playervars\s*[:=]\s*(\{[\s\S]*?\})\s*[,;]/);
+  // 1. 提取 playervars 里的 mediaDefinitions
+  const playerMatch = data.match(
+    /mediaDefinitions["']?\s*[:=]\s*(\[[\s\S]*?\])\s*[,}]/,
+  );
   if (playerMatch) {
     try {
-      const playervars = JSON.parse(playerMatch[1]);
-      mediaDefs = playervars.mediaDefinitions || null;
+      const raw = playerMatch[1]
+        .replace(/\\"/g, '"')
+        .replace(/\\\//g, "/")
+        .replace(/\\u0026/g, "&");
+      mediaDefs = JSON.parse(raw);
     } catch (e) {}
   }
 
-  // 2. 尝试 media_definitions API
-  if (!mediaDefs) {
+  // 2. 如果没取到，尝试 API
+  if (!mediaDefs || !Array.isArray(mediaDefs)) {
     const idMatch = url.match(/\/watch\/(\d+)/);
     if (idMatch) {
       try {
@@ -141,25 +146,64 @@ async function getTracks(ext) {
     }
   }
 
-  if (mediaDefs && Array.isArray(mediaDefs)) {
-    // 按质量从高到低排序
-    mediaDefs
-      .filter((item) => item.videoUrl)
-      .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))
-      .forEach((item) => {
-        tracks.push({
-          name:
-            (item.quality || item.format || "Default") +
-            (item.format ? ` (${item.format})` : ""),
-          pan: "",
-          ext: {
-            url: item.videoUrl,
+  if (mediaDefs && Array.isArray(mediaDefs) && mediaDefs.length > 0) {
+    // 优先找 hls 格式的中间地址
+    let intermediate = mediaDefs.find(
+      (item) => item.format === "hls" && item.videoUrl,
+    );
+    if (!intermediate) {
+      intermediate = mediaDefs.find((item) => item.videoUrl);
+    }
+
+    if (intermediate && intermediate.videoUrl) {
+      try {
+        // 请求中间地址，拿到真正的清晰度列表
+        const { data: realData } = await $fetch.get(intermediate.videoUrl, {
+          headers: {
+            "User-Agent": UA,
+            Cookie: "age_verified=1; platform=pc",
+            Referer: url,
           },
         });
-      });
+
+        let realList =
+          typeof realData === "string" ? JSON.parse(realData) : realData;
+
+        if (Array.isArray(realList) && realList.length > 0) {
+          // 按质量从高到低排序
+          realList
+            .filter((item) => item.videoUrl)
+            .sort(
+              (a, b) =>
+                (parseInt(b.quality) || parseInt(b.height) || 0) -
+                (parseInt(a.quality) || parseInt(a.height) || 0),
+            )
+            .forEach((item) => {
+              tracks.push({
+                name:
+                  (item.quality || item.height || item.format || "Default") +
+                  "p",
+                pan: "",
+                ext: {
+                  url: item.videoUrl,
+                },
+              });
+            });
+        }
+      } catch (e) {
+        // 中间请求失败就用原始地址兜底
+        tracks.push({
+          name: intermediate.quality || intermediate.format || "默认",
+          pan: "",
+          ext: {
+            url: intermediate.videoUrl,
+          },
+        });
+      }
+    }
   }
 
-  // 兜底：返回原页面让播放器嗅探
+  // 最终兜底
   if (tracks.length === 0) {
     tracks.push({
       name: "默认播放",
@@ -189,8 +233,9 @@ async function getPlayinfo(ext) {
     headers: [
       {
         "User-Agent": UA,
-        Referer: appConfig.site + "/",
+        Referer: "https://www.youporn.com/",
         Cookie: "age_verified=1; platform=pc",
+        Origin: "https://www.youporn.com",
       },
     ],
   });
