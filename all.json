@@ -41,6 +41,24 @@
       "type": 3,
       "api": "csp_vxxx",
       "ext": "https://raw.githubusercontent.com/luohao835-hub/video/main/vxxx.js"
+    },
+      {
+      "name": "tgs",
+      "type": 3,
+      "api": "csp_tgs",
+      "ext": "https://raw.githubusercontent.com/luohao835-hub/video/main/tgs.js"
+    },
+    {
+      "name": "tgs_xp",
+      "type": 3,
+      "api": "csp_tgs_xp",
+      "ext": "https://raw.githubusercontent.com/luohao835-hub/video/main/tgs_xp.js"
+    },
+    {
+      "name": "twivideo",
+      "type": 3,
+      "api": "csp_twivideo",
+      "ext": "https://raw.githubusercontent.com/luohao835-hub/video/main/twivideo.js"
     }
   ]
 }
